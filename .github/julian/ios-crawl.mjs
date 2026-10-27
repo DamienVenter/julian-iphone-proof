@@ -57,9 +57,9 @@ export function looks(all) {
 // ---- APPIUM ---------------------------------------------------------------------------------------------------------------
 // (over plain http with a long wait: the first session on a simulator builds Appium's agent there, which takes minutes, and
 // fetch gives up on an answer after five)
-const wd = (method, path, body) => new Promise(res => {
+const wd = (method, path, body, ms = 20 * 60 * 1000) => new Promise(res => {
   const data = body ? JSON.stringify(body) : '';
-  const rq = http.request(AP + path, { method, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) }, timeout: 20 * 60 * 1000 }, r => {
+  const rq = http.request(AP + path, { method, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) }, timeout: ms }, r => {
     let t = ''; r.setEncoding('utf8'); r.on('data', c => { t += c; }); r.on('end', () => { try { res((JSON.parse(t) || {}).value); } catch { res({ error: 'not JSON: ' + t.slice(0, 120) }); } }); });
   rq.on('timeout', () => rq.destroy(new Error('no answer in 20 minutes')));
   rq.on('error', e => res({ error: String(e.message) }));
@@ -71,7 +71,21 @@ const tap = (s, x, y) => wd('POST', '/session/' + s + '/actions', { actions: [{ 
 const screen = async s => parse(await wd('GET', '/session/' + s + '/source'));
 const SIMS = { 'iphone-se': ['iPhone SE (3rd generation)'], 'iphone-15': ['iPhone 16', 'iPhone 15'], 'iphone-max': ['iPhone 16 Pro Max', 'iPhone 15 Pro Max', 'iPhone 16 Plus'],
   ipad: ['iPad (10th generation)', 'iPad (A16)', 'iPad Air 11-inch (M2)', 'iPad Air 11-inch (M3)'], 'ipad-land': ['iPad (10th generation)', 'iPad (A16)', 'iPad Air 11-inch (M2)', 'iPad Air 11-inch (M3)'] };
-function sims() { try { const j = JSON.parse(execFileSync('xcrun', ['simctl', 'list', 'devices', 'available', '-j'], { encoding: 'utf8' })); return Object.values(j.devices).flat().map(d => d.name); } catch { return []; } }
+function sims() { try { const j = JSON.parse(execFileSync('xcrun', ['simctl', 'list', 'devices', 'available', '-j'], { encoding: 'utf8' })); return Object.values(j.devices).flat(); } catch { return []; } }
+// A SIMULATOR UP BEFORE APPIUM IS ASKED FOR IT (2026-10-27: the third one never booted, and the run waited twenty minutes on
+// it): booted here with a bounded wait, the one before shut down first so the Mac has room; one that will not come up in
+// six minutes is shut and the next of its kind tried, two at most; none, and its testers are skipped with a setup note.
+const xc = (args, ms) => { try { execFileSync('xcrun', ['simctl', ...args], { stdio: 'ignore', timeout: ms }); return true; } catch { return false; } };
+function bootOne(name) {
+  const all = sims(), kind = /^iPad/.test(name) ? /^iPad/ : /^iPhone/;
+  for (const n of [name, ...all.map(d => d.name).filter(x => kind.test(x) && x !== name)].filter((x, i, a) => a.indexOf(x) === i).slice(0, 3)) {
+    const d = all.find(x => x.name === n); if (!d) continue;
+    xc(['boot', d.udid], 120000);
+    if (xc(['bootstatus', d.udid], 360000)) return { udid: d.udid, name: n };
+    xc(['shutdown', d.udid], 60000);
+  }
+  return null;
+}
 const bundle = () => { try { return execFileSync('plutil', ['-extract', 'CFBundleIdentifier', 'raw', join(APP, 'Info.plist')], { encoding: 'utf8' }).trim(); } catch { return ''; } };
 // why it crashed, from the newest crash report the simulator left for it
 function crashWhy(app) {
@@ -93,13 +107,14 @@ async function picture(s, n, label, scale) {
     return 'data:image/jpeg;base64,' + out.toString('base64');
   } catch { return 'data:image/png;base64,' + b64; }
 }
-const LABEL = { overlap: 'Text overlaps', tap: 'Too small to tap', placeholder: 'Placeholder text', keyboard: 'Keyboard covers it', dead: 'Does nothing', appcrash: 'Crash' };
+const LABEL = { overlap: 'Text overlaps', tap: 'Too small to tap', placeholder: 'Placeholder text', keyboard: 'Keyboard covers it', dead: 'Does nothing', appcrash: 'Crash',
+  gate: 'Unlocked for free', trial: 'Trial not enforced', promo: 'Promo code', price: 'Price', money: 'Payment' };
 
 // ---- THE TESTERS ------------------------------------------------------------------------------------------------------------
 async function main() {
   const status = Object.fromEntries(LIST.map(p => [p.id, { id: p.id, state: 'waiting', page: '', found: 0 }]));
   const progress = async () => { const r = await tell('/api/testers/progress', { testers: Object.values(status), pages: [PAGE] }); return !!(r && r.stop); };
-  const id = bundle(), have = sims();
+  const id = bundle(), have = sims().map(d => d.name);
   if (!APP || !id) { await tell('/api/testers/found', { findings: [{ kind: 'setup', what: 'The app did not build', page: PAGE }] }); return; }
   // one simulator a kind of screen, the testers on it one after another
   const groups = new Map();
@@ -109,12 +124,13 @@ async function main() {
     if (stop) break;
     team.forEach(p => { status[p.id] = { ...status[p.id], state: 'running', doing: 'starting ' + sim }; });
     stop = await progress();
-    const land = team[0].device === 'ipad-land';
-    const ses = await wd('POST', '/session', { capabilities: { alwaysMatch: { platformName: 'iOS', 'appium:automationName': 'XCUITest', 'appium:deviceName': sim, 'appium:app': APP,
-      'appium:connectHardwareKeyboard': false, 'appium:simulatorStartupTimeout': 600000, 'appium:wdaLaunchTimeout': 360000, 'appium:wdaConnectionTimeout': 360000, 'appium:newCommandTimeout': 900, 'appium:orientation': land ? 'LANDSCAPE' : 'PORTRAIT' } } });
+    const land = team[0].device === 'ipad-land', up = bootOne(sim);
+    log('simulator', sim, up ? 'booted as ' + up.name : 'would not boot');
+    const ses = up ? await wd('POST', '/session', { capabilities: { alwaysMatch: { platformName: 'iOS', 'appium:automationName': 'XCUITest', 'appium:deviceName': up.name, 'appium:udid': up.udid, 'appium:app': APP,
+      'appium:connectHardwareKeyboard': false, 'appium:simulatorStartupTimeout': 600000, 'appium:wdaLaunchTimeout': 360000, 'appium:wdaConnectionTimeout': 360000, 'appium:newCommandTimeout': 900, 'appium:orientation': land ? 'LANDSCAPE' : 'PORTRAIT' } } }, 10 * 60 * 1000) : null;
     const s = ses && ses.sessionId;
     log('simulator', sim, s ? 'ready' : 'would not start: ' + JSON.stringify(ses).slice(0, 300));
-    if (!s) { await tell('/api/testers/found', { findings: [{ kind: 'setup', what: 'The ' + sim + ' simulator would not start', page: PAGE }] }); team.forEach(p => { status[p.id] = { ...status[p.id], state: 'done', doing: '' }; }); continue; }
+    if (!s) { if (up) xc(['shutdown', up.udid], 60000); await tell('/api/testers/found', { findings: [{ kind: 'setup', what: 'The ' + sim + ' simulator would not start', page: PAGE }] }); team.forEach(p => { status[p.id] = { ...status[p.id], state: 'done', doing: '' }; }); continue; }
     const caps = ses.capabilities || {}, udid = caps.udid || 'booted';
     const win = await wd('GET', '/session/' + s + '/window/rect'), shot = await wd('GET', '/session/' + s + '/screenshot');
     const scale = (() => { try { return Buffer.from(String(shot), 'base64').readUInt32BE(16) / ((win && win.width) || 390); } catch { return 2; } })();
@@ -132,10 +148,21 @@ async function main() {
       const alive = async () => (await run(s, 'mobile: queryAppState', { bundleId: id })) === 4;
       const crashed = async () => { if (await alive()) return false; await note('appcrash', 'App crashes' + ((w => (w ? ': ' + w : ''))(crashWhy(id.split('.').pop()))), null);
         await run(s, 'mobile: activateApp', { bundleId: id }); await sleep(2500); return true; };
+      // MONEY ON THE IPHONE (Sir, 2026-10-27, "not just the web"): promo codes, the subscribe step and its price, and
+      // bypassing a paywall by flipping the app's own saved settings (UserDefaults). Only on a money screen.
+      let moneyRun = !p.money;
+      if (p.money) { status[p.id].doing = 'testing the money flows';
+        try { moneyRun = await iosMoney(s, id, udid, note, steps); } catch (e) { log(p.id, 'money error', String((e && e.message) || e).slice(0, 80)); }
+        await run(s, 'mobile: terminateApp', { bundleId: id }); await run(s, 'mobile: activateApp', { bundleId: id }); await sleep(2000); await crashed();
+      }
       const tested = new Set(), max = LIST.length > 6 ? 25 : 20;
       for (let i = 0; i < max && !stop; i++) {
         const nodes = await screen(s);
         status[p.id].doing = 'looking at the screen'; status[p.id].found = mine.length;
+        // a money screen reached by tapping around: test it once, then reopen the app fresh
+        if (!moneyRun && M_MONEY.test(nodes.map(x => x.label || x.value || x.name).filter(Boolean).join(' '))) { moneyRun = true; status[p.id].doing = 'testing the money flows';
+          try { await iosMoney(s, id, udid, note, steps); } catch {}
+          await run(s, 'mobile: terminateApp', { bundleId: id }); await run(s, 'mobile: activateApp', { bundleId: id }); await sleep(2000); await crashed(); continue; }
         for (const [k, w, n] of looks(nodes)) await note(k, w, n);
         // THE KEYBOARD OVER THE BOX: every box typed into with the keyboard up
         const box = nodes.find(n => BOX.test(n.type) && !tested.has('e' + n.type + Math.round(n.y1)));
@@ -171,8 +198,68 @@ async function main() {
       status[p.id] = { ...status[p.id], state: 'done', doing: '', found: mine.length };
       stop = await progress();
     }
-    await wd('DELETE', '/session/' + s);
+    await wd('DELETE', '/session/' + s, null, 120000);
+    xc(['shutdown', up.udid], 60000);
   }
+}
+
+// ---- MONEY ON THE IPHONE (deploy/CHUNK-testers.md, 2026-10-27) --------------------------------------------------------------
+const M_MONEY = /\b(free trial|trial|subscri|upgrade|premium|\bpro\b|\bplan\b|pricing|per month|\/mo\b|\/month|billed|billing|checkout|buy now|purchase|promo|coupon|discount|renew|cancel anytime|unlock)\b/i;
+const M_PRICE = /[$£€]\s?\d[\d.,]*|\d[\d.,]*\s?(?:USD|EUR|GBP)/i;
+const M_WALL = /upgrade to|start.{0,8}(?:free )?trial|subscribe to|unlock .{0,20}(?:with|by)|go (?:pro|premium)|trial (?:expired|ended|over)|renew|members? only|to continue|to unlock/i;
+const M_ENT = /trial|subscri|premium|pro|plan|paid|member|expire|expiry|licen[cs]e|entitl|unlock|credit|tier|upgrade|billing|active/i;
+const M_PROMO = /promo|coupon|discount|voucher|\bcode\b|gift/i;
+const twoP = s => (String(s || '').match(/[$£€]\s?\d[\d.,]*/g) || []).slice(0, 6).join(' ');
+const scrText = ns => ns.map(n => [n.label, n.value, n.name].filter(Boolean).join(' ')).join(' ');
+const xcOut = args => { try { return execFileSync('xcrun', ['simctl', ...args], { encoding: 'utf8', timeout: 120000 }); } catch { return ''; } };
+async function iosMoney(s, id, udid, note, steps) {
+  let ns = await screen(s), txt = scrText(ns);
+  if (!M_MONEY.test(txt) && !M_PRICE.test(txt)) return false;
+  steps.push('Look at the money flows');
+  const total = t => { const m = /(?:total|to pay|amount due|order total|subtotal|you pay)[^\d$£€]{0,20}([$£€]?\s?\d[\d.,]*)/i.exec(t); return (m ? m[1] : (t.match(/[$£€]\s?\d[\d.,]*/) || [''])[0]).replace(/\s/g, ''); };
+  const tap = (x, y) => wd('POST', '/session/' + s + '/actions', { actions: [{ type: 'pointer', id: 'f', parameters: { pointerType: 'touch' }, actions: [{ type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) }, { type: 'pointerDown', button: 0 }, { type: 'pause', duration: 60 }, { type: 'pointerUp', button: 0 }] }] });
+
+  // 1. PROMO CODES: a made-up code must be refused, not quietly taken
+  const promo = ns.find(n => BOX.test(n.type) && M_PROMO.test([n.label, n.name, n.value].filter(Boolean).join(' ')));
+  if (promo) {
+    const t0 = total(txt); await tap((promo.x1 + promo.x2) / 2, (promo.y1 + promo.y2) / 2); await sleep(700);
+    await wd('POST', '/session/' + s + '/actions', { actions: [{ type: 'key', id: 'k', actions: [...'JULIANZZ42'].flatMap(c => [{ type: 'keyDown', value: c }, { type: 'keyUp', value: c }]) }] }).catch(() => null);
+    await sleep(400); let a = await screen(s); const apply = a.find(n => /^(Button|Cell)$/.test(n.type) && /apply|redeem|use|add|submit/i.test(n.label + ' ' + n.name));
+    if (apply) await tap((apply.x1 + apply.x2) / 2, (apply.y1 + apply.y2) / 2); await sleep(900);
+    a = await screen(s); const t1 = total(scrText(a)), msg = (scrText(a).match(/\b(invalid|not valid|expired|does(?:n't| not) (?:work|apply)|incorrect|applied|success|% ?off|discount)\b/i) || [''])[0];
+    steps.push('Try a made-up promo code');
+    if ((t0 && t1 && t0 !== t1) || /\b(applied|success|% ?off|discount)\b/i.test(msg)) await note('promo', 'Any promo code is accepted', null);
+    else if (!msg) await note('promo', 'A wrong code gives no message', null);
+  }
+  // 2. SUBSCRIBE / CHECKOUT: reach the pay step and see the price is there
+  ns = await screen(s); txt = scrText(ns); const planPrice = twoP(txt);
+  const cta = ns.find(n => /^(Button|Cell)$/.test(n.type) && n.enabled && /^(subscribe|upgrade|start.{0,8}(?:free )?trial|get .{0,12}(?:pro|premium|plan|started)|choose .{0,8}plan|buy|checkout|continue|go premium|try .{0,8}free)/i.test((n.label || n.name || '').trim()));
+  if (cta) { const label = nameOf(cta); steps.push('Press "' + label + '"'); const sig = sigOf(ns); await tap((cta.x1 + cta.x2) / 2, (cta.y1 + cta.y2) / 2); await sleep(1600);
+    const a = await screen(s), at = scrText(a), moved = sigOf(a) !== sig, pay = /card number|cvc|cvv|expiry|pay now|place order|complete (?:order|purchase|subscription|payment)|billing/i.test(at);
+    if (!moved) await note('money', 'The subscribe step does not start', cta);
+    else if (pay && !M_PRICE.test(at)) await note('price', 'The pay step shows no price', cta);
+    else if (pay && planPrice && !twoP(at).split(' ').some(x => planPrice.includes(x))) await note('price', 'The pay price does not match the plan', cta);
+    await run(s, 'mobile: terminateApp', { bundleId: id }); await run(s, 'mobile: activateApp', { bundleId: id }); await sleep(2000);
+  }
+  // 3. BYPASS the paywall by flipping the app's own saved settings (UserDefaults), then reopening it. (The iOS simulator has
+  // no supported way to move its clock, so the after-the-trial clock jump is the web and Android testers' job.)
+  ns = await screen(s); txt = scrText(ns);
+  if (M_WALL.test(txt) || /pro|premium|unlock|subscribe/i.test(txt)) {
+    const dump = xcOut(['spawn', udid, 'defaults', 'read', id]); const before = txt.length, wall0 = M_WALL.test(txt);
+    let any = false;
+    for (const m of dump.matchAll(/([A-Za-z0-9_.]+)\s*=\s*([^;]+);/g)) { const k = m[1], v = m[2].trim();
+      if (!M_ENT.test(k)) continue;
+      if (/^(0|1)$/.test(v) || /^(YES|NO|true|false)$/i.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', id, k, '-bool', 'YES']); any = true; }
+      else if (/^"?\d{4}-\d\d-\d\d/.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', id, k, '-string', '2100-01-01']); any = true; }
+      else if (/^"/.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', id, k, '-string', 'pro']); any = true; }
+      else if (/^\d+$/.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', id, k, '-int', /expire|expiry|end|until|period/i.test(k) ? '4102444800' : '1']); any = true; }
+    }
+    if (any) { await run(s, 'mobile: terminateApp', { bundleId: id }); await run(s, 'mobile: activateApp', { bundleId: id }); await sleep(2500);
+      const a = await screen(s); steps.push('Flip a saved setting and reopen');
+      if ((wall0 && !M_WALL.test(scrText(a))) || scrText(a).length > before * 1.3 + 40) await note('gate', 'A paid thing unlocks on the phone', null);
+    }
+  }
+  return true;
 }
 
 const mode = process.argv[2];
