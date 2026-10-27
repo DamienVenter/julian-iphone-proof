@@ -1,0 +1,53 @@
+# Julian's iPhone testers (put here by Julian, core/ios.js). It runs only when Julian starts it: it builds this app for the
+# iPhone simulator on GitHub's Mac, and Julian's testers go over it on iPhone and iPad simulators, saying what they find
+# straight back to Julian. Nothing in the app is changed. Delete this file to stop it ever being used.
+name: Julian iPhone testers
+on:
+  workflow_dispatch:
+    inputs:
+      run:
+        description: Julian's run
+        required: true
+      key:
+        description: The run's own key
+        required: true
+      base:
+        description: Julian's address
+        required: true
+      testers:
+        description: The testers
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: julian-iphone-testers
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 80
+    env:
+      JULIAN_RUN: ${{ inputs.run }}
+      JULIAN_KEY: ${{ inputs.key }}
+      JULIAN_BASE: ${{ inputs.base }}
+      JULIAN_TESTERS: ${{ inputs.testers }}
+    steps:
+      - name: Hide the run's key
+        run: echo "::add-mask::$JULIAN_KEY"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Tell Julian it started
+        run: node .github/julian/ios-crawl.mjs hello "building the app on GitHub's Mac"
+      - name: Build the app
+        run: bash .github/julian/ios-build.sh
+      - name: Get Appium ready
+        run: |
+          npm install -g appium
+          appium driver install xcuitest
+          cd .github/julian && npm install --no-save --no-package-lock sharp
+      - name: The testers
+        run: |
+          appium --log-level error > "$RUNNER_TEMP/appium.log" 2>&1 &
+          node .github/julian/ios-crawl.mjs
