@@ -21,6 +21,21 @@ struct ContentView: View {
   @AppStorage("isPro") private var isPro = false
 
   var body: some View {
+    // (the pay step is its own screen, as a real one is: nothing from the plan page, so nothing there says the price)
+    if showPay {
+      VStack(alignment: .leading, spacing: 14) {
+        Text("Complete your subscription. Enter your card and pay now.")
+        TextField("Card number", text: $card)
+        Button("Pay now") {}
+        Spacer()
+      }
+      .padding()
+    } else {
+      plan
+    }
+  }
+
+  var plan: some View {
     ZStack(alignment: .bottom) {
       VStack(alignment: .leading, spacing: 14) {
         Text(title).font(.largeTitle)
@@ -40,11 +55,6 @@ struct ContentView: View {
         Button("Apply") { total = "Order total: $1"; promoMsg = "Code applied! 95% off." }
         Text(promoMsg)
         Button("Subscribe") { showPay = true }
-        if showPay {
-          Text("Complete your subscription. Enter your card and pay now.")
-          TextField("Card number", text: $card)
-          Button("Pay now") {}
-        }
         if isPro {
           Text("Your weekly reports. " + String(repeating: "Revenue up. Churn down. More numbers here. ", count: 30))
         } else {
