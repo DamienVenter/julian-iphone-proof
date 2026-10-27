@@ -14,6 +14,10 @@ on:
       base:
         description: Julian's address
         required: true
+      folder:
+        description: The project's folder in this repo
+        required: false
+        default: .
       testers:
         description: The testers
         required: true
@@ -30,6 +34,7 @@ jobs:
       JULIAN_RUN: ${{ inputs.run }}
       JULIAN_KEY: ${{ inputs.key }}
       JULIAN_BASE: ${{ inputs.base }}
+      JULIAN_FOLDER: ${{ inputs.folder }}
       JULIAN_TESTERS: ${{ inputs.testers }}
     steps:
       - name: Hide the run's key
@@ -41,7 +46,7 @@ jobs:
       - name: Tell Julian it started
         run: node .github/julian/ios-crawl.mjs hello "building the app on GitHub's Mac"
       - name: Build the app
-        run: bash .github/julian/ios-build.sh
+        run: cd -- "${JULIAN_FOLDER:-.}" && bash "$GITHUB_WORKSPACE/.github/julian/ios-build.sh"
       - name: Get Appium ready
         run: |
           npm install -g appium

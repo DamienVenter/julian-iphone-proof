@@ -8,6 +8,7 @@
 //   node ios-crawl.mjs              the testers
 //   node ios-crawl.mjs hello "..."  tell Julian how far it has got
 import { execFileSync } from 'node:child_process';
+import http from 'node:http';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -36,7 +37,10 @@ const LEAVE = /delete|remove|pay|buy|purchase|log ?out|sign ?out|subscribe|unsub
 const nameOf = n => (BOX.test(n.type) ? n.label || n.name || n.value || 'the text box' : n.label || n.name || n.value || n.type).slice(0, 40);
 const sigOf = list => list.map(n => n.type + n.label + n.value + Math.round(n.x1) + ',' + Math.round(n.y1)).join('|');
 // what code sees on a screen: text over text, too small to tap, placeholder words
-export function looks(nodes) {
+export function looks(all) {
+  // (the app's own screen: never the keyboard over it, whose keys are the system's)
+  const kb = all.find(n => n.type === 'Keyboard'), inKb = n => kb && n.y1 >= kb.y1 - 1 && n.x1 >= kb.x1 - 1 && n.x2 <= kb.x2 + 1;
+  const nodes = all.filter(n => n.type !== 'Keyboard' && !inKb(n));
   const out = [], texts = nodes.filter(n => n.type === 'StaticText' && (n.label || n.value));
   for (let a = 0; a < texts.length; a++) for (let b = a + 1; b < texts.length; b++) {
     const A = texts[a], B = texts[b];
@@ -51,8 +55,16 @@ export function looks(nodes) {
 }
 
 // ---- APPIUM ---------------------------------------------------------------------------------------------------------------
-const wd = async (method, path, body) => { const r = await fetch(AP + path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).catch(e => ({ json: async () => ({ value: { error: String(e.message) } }) }));
-  const j = await r.json().catch(() => ({})); return j && j.value; };
+// (over plain http with a long wait: the first session on a simulator builds Appium's agent there, which takes minutes, and
+// fetch gives up on an answer after five)
+const wd = (method, path, body) => new Promise(res => {
+  const data = body ? JSON.stringify(body) : '';
+  const rq = http.request(AP + path, { method, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) }, timeout: 20 * 60 * 1000 }, r => {
+    let t = ''; r.setEncoding('utf8'); r.on('data', c => { t += c; }); r.on('end', () => { try { res((JSON.parse(t) || {}).value); } catch { res({ error: 'not JSON: ' + t.slice(0, 120) }); } }); });
+  rq.on('timeout', () => rq.destroy(new Error('no answer in 20 minutes')));
+  rq.on('error', e => res({ error: String(e.message) }));
+  rq.end(data);
+});
 const run = (s, script, args = {}) => wd('POST', '/session/' + s + '/execute/sync', { script, args: [args] });
 const tap = (s, x, y) => wd('POST', '/session/' + s + '/actions', { actions: [{ type: 'pointer', id: 'f', parameters: { pointerType: 'touch' }, actions: [
   { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) }, { type: 'pointerDown', button: 0 }, { type: 'pause', duration: 60 }, { type: 'pointerUp', button: 0 }] }] });
@@ -99,7 +111,7 @@ async function main() {
     stop = await progress();
     const land = team[0].device === 'ipad-land';
     const ses = await wd('POST', '/session', { capabilities: { alwaysMatch: { platformName: 'iOS', 'appium:automationName': 'XCUITest', 'appium:deviceName': sim, 'appium:app': APP,
-      'appium:connectHardwareKeyboard': false, 'appium:wdaLaunchTimeout': 360000, 'appium:wdaConnectionTimeout': 360000, 'appium:newCommandTimeout': 900, 'appium:orientation': land ? 'LANDSCAPE' : 'PORTRAIT' } } });
+      'appium:connectHardwareKeyboard': false, 'appium:simulatorStartupTimeout': 600000, 'appium:wdaLaunchTimeout': 360000, 'appium:wdaConnectionTimeout': 360000, 'appium:newCommandTimeout': 900, 'appium:orientation': land ? 'LANDSCAPE' : 'PORTRAIT' } } });
     const s = ses && ses.sessionId;
     log('simulator', sim, s ? 'ready' : 'would not start: ' + JSON.stringify(ses).slice(0, 300));
     if (!s) { await tell('/api/testers/found', { findings: [{ kind: 'setup', what: 'The ' + sim + ' simulator would not start', page: PAGE }] }); team.forEach(p => { status[p.id] = { ...status[p.id], state: 'done', doing: '' }; }); continue; }
@@ -133,8 +145,11 @@ async function main() {
           await run(s, 'mobile: keys', { keys: [...(p.way === 'words' ? 'Supercalifragilistic Julian' : 'Julian tester')] }).catch(() => null);
           await sleep(600); steps.push('Type into ' + nameOf(box));
           const after = await screen(s), kb = after.find(n => n.type === 'Keyboard'), same = after.find(n => n.type === box.type && Math.abs(n.x1 - box.x1) < 2) || box;
+          log(p.id, 'typed into', nameOf(box), 'at', Math.round(same.y1) + '-' + Math.round(same.y2), kb ? 'keyboard from ' + Math.round(kb.y1) : 'no keyboard on screen');
           if (kb && same.y2 > kb.y1 + 2) await note('keyboard', 'Keyboard covers "' + nameOf(box) + '"', same);
-          await run(s, 'mobile: hideKeyboard', {}).catch(() => null); await sleep(400);
+          // (down again: the hide key, else return, as an iPad has no hide)
+          await run(s, 'mobile: hideKeyboard', {}); await sleep(400);
+          if ((await screen(s)).some(n => n.type === 'Keyboard')) { await run(s, 'mobile: keys', { keys: ['\n'] }); await sleep(400); }
           continue;
         }
         // PRESS EVERYTHING: each control must do something
