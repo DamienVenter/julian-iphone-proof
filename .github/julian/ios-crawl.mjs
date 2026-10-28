@@ -232,6 +232,9 @@ async function iosMoney(s, id, udid, note, steps) {
     if (apply) await tap((apply.x1 + apply.x2) / 2, (apply.y1 + apply.y2) / 2); await sleep(900);
     a = await screen(s); const t1 = total(scrText(a)), msg = (scrText(a).match(/\b(invalid|not valid|expired|does(?:n't| not) (?:work|apply)|incorrect|applied|success|% ?off|discount)\b/i) || [''])[0];
     steps.push('Try a made-up promo code');
+    // (the keyboard down again before the next look: left up, it hid the Subscribe button and that check was skipped)
+    await run(s, 'mobile: hideKeyboard', {}); await sleep(400);
+    if ((await screen(s)).some(n => n.type === 'Keyboard')) { await run(s, 'mobile: keys', { keys: ['\n'] }); await sleep(400); }
     if ((t0 && t1 && t0 !== t1) || /\b(applied|success|% ?off|discount)\b/i.test(msg)) await note('promo', 'Any promo code is accepted', null);
     else if (!msg) await note('promo', 'A wrong code gives no message', null);
   }
