@@ -19,6 +19,8 @@ struct ContentView: View {
   @State private var promoMsg = ""
   @State private var showPay = false
   @AppStorage("isPro") private var isPro = false
+  // (stored on first launch, as an app does after its purchase check: SwiftUI keeps a default only in memory until it is set)
+  init() { if UserDefaults.standard.object(forKey: "isPro") == nil { UserDefaults.standard.set(false, forKey: "isPro") } }
 
   var body: some View {
     // (the pay step is its own screen, as a real one is: nothing from the plan page, so nothing there says the price)
