@@ -61,7 +61,7 @@ const wd = (method, path, body, ms = 20 * 60 * 1000) => new Promise(res => {
   const data = body ? JSON.stringify(body) : '';
   const rq = http.request(AP + path, { method, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) }, timeout: ms }, r => {
     let t = ''; r.setEncoding('utf8'); r.on('data', c => { t += c; }); r.on('end', () => { try { res((JSON.parse(t) || {}).value); } catch { res({ error: 'not JSON: ' + t.slice(0, 120) }); } }); });
-  rq.on('timeout', () => rq.destroy(new Error('no answer in 20 minutes')));
+  rq.on('timeout', () => rq.destroy(new Error('no answer in ' + Math.round(ms / 60000) + ' minutes')));
   rq.on('error', e => res({ error: String(e.message) }));
   rq.end(data);
 });
@@ -120,6 +120,7 @@ async function main() {
   const groups = new Map();
   for (const p of LIST) { const name = (SIMS[p.device] || []).find(n => have.includes(n)) || have.find(n => /^iPhone/.test(n)) || 'iPhone 16'; if (!groups.has(name)) groups.set(name, []); groups.get(name).push(p); }
   let stop = false;
+  let port = 8100;
   for (const [sim, team] of groups) {
     if (stop) break;
     team.forEach(p => { status[p.id] = { ...status[p.id], state: 'running', doing: 'starting ' + sim }; });
@@ -127,10 +128,10 @@ async function main() {
     const land = team[0].device === 'ipad-land', up = bootOne(sim);
     log('simulator', sim, up ? 'booted as ' + up.name : 'would not boot');
     const ses = up ? await wd('POST', '/session', { capabilities: { alwaysMatch: { platformName: 'iOS', 'appium:automationName': 'XCUITest', 'appium:deviceName': up.name, 'appium:udid': up.udid, 'appium:app': APP,
-      'appium:connectHardwareKeyboard': false, 'appium:simulatorStartupTimeout': 600000, 'appium:wdaLaunchTimeout': 360000, 'appium:wdaConnectionTimeout': 360000, 'appium:newCommandTimeout': 900, 'appium:orientation': land ? 'LANDSCAPE' : 'PORTRAIT' } } }, 10 * 60 * 1000) : null;
+      'appium:connectHardwareKeyboard': false, 'appium:wdaLocalPort': port++, 'appium:simulatorStartupTimeout': 600000, 'appium:wdaLaunchTimeout': 360000, 'appium:wdaConnectionTimeout': 360000, 'appium:newCommandTimeout': 900, 'appium:orientation': land ? 'LANDSCAPE' : 'PORTRAIT' } } }, 10 * 60 * 1000) : null;
     const s = ses && ses.sessionId;
     log('simulator', sim, s ? 'ready' : 'would not start: ' + JSON.stringify(ses).slice(0, 300));
-    if (!s) { if (up) xc(['shutdown', up.udid], 60000); await tell('/api/testers/found', { findings: [{ kind: 'setup', what: 'The ' + sim + ' simulator would not start', page: PAGE }] }); team.forEach(p => { status[p.id] = { ...status[p.id], state: 'done', doing: '' }; }); continue; }
+    if (!s) { if (up) xc(['shutdown', up.udid], 60000); try { execFileSync('pkill', ['-f', 'WebDriverAgent'], { stdio: 'ignore' }); } catch {} await tell('/api/testers/found', { findings: [{ kind: 'setup', what: 'The ' + sim + ' simulator would not start', page: PAGE }] }); team.forEach(p => { status[p.id] = { ...status[p.id], state: 'done', doing: '' }; }); continue; }
     const caps = ses.capabilities || {}, udid = caps.udid || 'booted';
     const win = await wd('GET', '/session/' + s + '/window/rect'), shot = await wd('GET', '/session/' + s + '/screenshot');
     const scale = (() => { try { return Buffer.from(String(shot), 'base64').readUInt32BE(16) / ((win && win.width) || 390); } catch { return 2; } })();
@@ -200,6 +201,9 @@ async function main() {
     }
     await wd('DELETE', '/session/' + s, null, 120000);
     xc(['shutdown', up.udid], 60000);
+    // (the agent Appium ran on that screen is stopped too: one left running held the next screen's agent up, so the third
+    // simulator never answered)
+    try { execFileSync('pkill', ['-f', 'WebDriverAgent'], { stdio: 'ignore' }); } catch {}
   }
 }
 
