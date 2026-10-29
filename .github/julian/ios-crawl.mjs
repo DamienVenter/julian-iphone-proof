@@ -252,14 +252,17 @@ async function iosMoney(s, id, udid, note, steps) {
   // no supported way to move its clock, so the after-the-trial clock jump is the web and Android testers' job.)
   ns = await screen(s); txt = scrText(ns);
   if (M_WALL.test(txt) || /pro|premium|unlock|subscribe/i.test(txt)) {
-    const dump = xcOut(['spawn', udid, 'defaults', 'read', id]); const before = txt.length, wall0 = M_WALL.test(txt);
+    // (the app's own settings live in its own container, not the simulator's: read and written there, through the simulator's
+    // own defaults so its settings daemon holds the change)
+    const box = xcOut(['get_app_container', udid, id, 'data']).trim(), dom = box ? box + '/Library/Preferences/' + id : id;
+    const dump = xcOut(['spawn', udid, 'defaults', 'read', dom]); const before = txt.length, wall0 = M_WALL.test(txt);
     let any = false;
     for (const m of dump.matchAll(/([A-Za-z0-9_.]+)\s*=\s*([^;]+);/g)) { const k = m[1], v = m[2].trim();
       if (!M_ENT.test(k)) continue;
-      if (/^(0|1)$/.test(v) || /^(YES|NO|true|false)$/i.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', id, k, '-bool', 'YES']); any = true; }
-      else if (/^"?\d{4}-\d\d-\d\d/.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', id, k, '-string', '2100-01-01']); any = true; }
-      else if (/^"/.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', id, k, '-string', 'pro']); any = true; }
-      else if (/^\d+$/.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', id, k, '-int', /expire|expiry|end|until|period/i.test(k) ? '4102444800' : '1']); any = true; }
+      if (/^(0|1)$/.test(v) || /^(YES|NO|true|false)$/i.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', dom, k, '-bool', 'YES']); any = true; }
+      else if (/^"?\d{4}-\d\d-\d\d/.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', dom, k, '-string', '2100-01-01']); any = true; }
+      else if (/^"/.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', dom, k, '-string', 'pro']); any = true; }
+      else if (/^\d+$/.test(v)) { xcOut(['spawn', udid, 'defaults', 'write', dom, k, '-int', /expire|expiry|end|until|period/i.test(k) ? '4102444800' : '1']); any = true; }
     }
     if (any) { await run(s, 'mobile: terminateApp', { bundleId: id }); await run(s, 'mobile: activateApp', { bundleId: id }); await sleep(2500);
       const a = await screen(s); steps.push('Flip a saved setting and reopen');
